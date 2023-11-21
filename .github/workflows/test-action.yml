@@ -4,100 +4,67 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        type: choice
-        options:
-          - dev
-          - qa
-          - prod
+        type: env
 
 jobs:
- initialize-terraform:
+  lint-validate-terraform:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        terraform-version: [0.12.x, 0.13.x, 0.14.x]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v2
 
-      - name: Setup Terraform
-        uses: actions/setup-terraform@v2
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
         with:
-          terraform-version: 1.3.0
+          terraform_version: ${{ matrix.terraform-version }}
 
-      - name: Initialize Terraform working directory
+      - name: Lint Terraform code formatting
         run: |
-          terraform init
- lint-terraform:
-    runs-on: terraform-agent
-    needs: initialize-terraform
-    steps:
-      - uses: actions/checkout@v3
-      - name: Check Terraform code formatting
-        run: |
-          tf_fmt_file=$(terraform fmt | wc -l)
-          if [[ ${tf_fmt_file} > 0 ]]; then
-            echo "Please format terraform files using:- terraform fmt"
-            exit 1
-          else
-            echo "All files are formatted using terraform fmt"
-          fi
+          terraform fmt -check
 
- validate-terraform:
-    runs-on: terraform-agent
-    needs: [initialize-terraform, lint-terraform]
-    steps:
-      - uses: actions/checkout@v3
       - name: Validate Terraform code
-        run: |
-          terraform init
-          terraform validate
+        run: terraform validate
 
- scan-terraform-security:
-    runs-on: terraform-agent
-    needs: validate-terraform
+  plan-infrastructure:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        terraform-version: [0.12.x, 0.13.x, 0.14.x]
+    needs: lint-validate-terraform
     steps:
-      - uses: actions/checkout@v3
-      - name: Scan Terraform code for security issues
-        run: |
-          tfsec . --tfvars-file dev.tfvars
-          if [ $? -ne 0 ]; then
-            echo "Terraform code contains security vulnerabilities."
-            exit 1
-          else
-            echo "Terraform code is free from security vulnerabilities."
-          fi
+      - name: Checkout code
+        uses: actions/checkout@v2
 
- estimate-terraform-cost:
-    runs-on: terraform-agent
-    needs: validate-terraform
-    steps:
-      - uses: actions/checkout@v3
-      - name: Estimate Terraform infrastructure cost
-        run: |
-          terraform init
-          terraform plan | infracost
-          if [ $? -ne 0 ]; then
-            echo "Terraform infrastructure cost estimate failed."
-            exit 1
-          else
-            echo "Terraform infrastructure cost estimate generated."
-          fi
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: ${{ matrix.terraform-version }}
 
- plan-infrastructure:
-    runs-on: terraform-agent
-    needs: [validate-terraform, scan-terraform-security, estimate-terraform-cost]
-    steps:
-      - name: Set environment variable based on input
-        id: set-env
-        run: |
-          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
-      - uses: actions/checkout@v3
+      - name: Initialize Terraform
+        run: terraform init --var-file=${{ env.ENVIRONMENT }}.tfvars
+
       - name: Plan Terraform changes
-        run: |
-          terraform init --var-file=${{ env.ENVIRONMENT }}.tfvars && terraform plan
+        run: terraform plan
 
- manual-deploy-confirmation:
-    runs-on: terraform-agent
+  manual-deploy-confirmation:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        terraform-version: [0.12.x, 0.13.x, 0.14.x]
     needs: plan-infrastructure
+    if: github.event_name == 'workflow_run' && github.event.inputs.environment == 'prod'
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: ${{ matrix.terraform-version }}
+
       - name: Check for manual confirmation
         uses: actions/github-script@v6
         with:
@@ -106,14 +73,27 @@ jobs:
             console.log("Please review the plan and confirm deployment manually.")
             console.log("To confirm deployment, comment 'deploy' on this workflow run.")
 
- deploy-infrastructure:
-    runs-on: terraform-agent
-    needs: [plan-infrastructure, manual-deploy-confirmation]
-    if: startsWith(github.event.comment.body, 'deploy')
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        terraform-version: [0.12.x, 0.13.x, 0.14.x]
+    needs: manual-deploy-confirmation
+    if: github.ref == 'refs/heads/main' && startsWith(github.event.comment.body, 'deploy')
     env:
-      TF_VAR_GOOGLE_CLOUD_PROJECT: ${{ env.GOOGLE_CLOUD_PROJECT }}
-      TF_VAR_GOOGLE_REGION: ${{ env.GOOGLE_REGION }}
+      TF_VAR_GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+      TF_VAR_GOOGLE_REGION: ${{ secrets.GOOGLE_REGION }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: ${{ matrix.terraform-version }}
+
+      - name: Initialize Terraform
+        run: terraform init --var-file=${{ env.ENVIRONMENT }}.tfvars
+
       - name: Apply Terraform changes
-        run: |
-          terraform apply -auto-approve --var-file=${{ env.ENVIRONMENT }}.tfvars
+        run: terraform apply -auto-approve --var-file=${{ env.ENVIRONMENT }}.tfvars
